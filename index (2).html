@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CargoDZ – Cargos à proximité</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{--asphalte:#263342;--signal:#F2B705;--route:#3A4B5E;--blanc:#FFFFFF;--gris:#E6EAEE;--vert:#2E9E6A}
+  *{box-sizing:border-box;margin:0}
+  body{font-family:Barlow,system-ui,sans-serif;background:var(--gris);color:var(--asphalte);padding:16px}
+  h1{font-family:"Barlow Condensed",sans-serif;font-size:1.9rem;line-height:1.1}
+  p{max-width:60ch;margin:.4rem 0 1rem}
+  .btn{font-family:"Barlow Condensed",sans-serif;font-size:1.25rem;font-weight:700;background:var(--signal);color:var(--asphalte);
+       border:3px solid var(--asphalte);padding:.7rem 1.6rem;border-radius:6px;cursor:pointer}
+  .btn:focus-visible,.rayon button:focus-visible{outline:3px solid var(--route);outline-offset:3px}
+  #zone{display:none;margin-top:16px;background:var(--blanc);border-radius:10px;overflow:hidden;border:2px solid var(--asphalte)}
+  .barre{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--asphalte);color:var(--blanc)}
+  .rayon button{font:600 1rem Barlow,sans-serif;background:transparent;color:var(--blanc);border:2px solid var(--route);padding:.3rem .7rem;border-radius:20px;cursor:pointer}
+  .rayon button.actif{background:var(--signal);color:var(--asphalte);border-color:var(--signal)}
+  #carte{height:60vh;min-height:320px}
+  #etat{padding:10px 12px;font-weight:500}
+  #liste{list-style:none;padding:0 12px 12px}
+  #liste li{display:flex;justify-content:space-between;gap:8px;padding:10px 0;border-top:1px solid var(--gris);cursor:pointer}
+  .dist{font-family:"Barlow Condensed",sans-serif;font-size:1.2rem;font-weight:700;white-space:nowrap}
+  .libre{color:var(--vert);font-weight:500}
+  .erreur{color:#B3261E}
+</style>
+</head>
+<body>
+  <h1>Trouver un cargo près de vous</h1>
+  <p>Autorisez la localisation pour voir les camions et fourgons disponibles autour de vous.</p>
+  <button class="btn" id="btnAttente">Liste d'attente</button>
+
+  <div id="zone">
+    <div class="barre">
+      <strong id="compteur">Recherche…</strong>
+      <div class="rayon" id="rayons">
+        <button data-km="5">5 km</button><button data-km="10" class="actif">10 km</button>
+        <button data-km="25">25 km</button><button data-km="50">50 km</button>
+      </div>
+    </div>
+    <div id="carte"></div>
+    <div id="etat"></div>
+    <ul id="liste"></ul>
+  </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/* ============================================================
+   DONNÉES DES CARGOS
+   Remplacez ce tableau par les vraies positions venant de votre
+   backend (ex. fetch("https://votre-api/cargos")).
+   Si le tableau est vide, des cargos de démonstration sont créés
+   autour du client pour tester.
+   ============================================================ */
+let CARGOS = [
+  // { nom:"Fourgon Hyundai H100", type:"Fourgon", chauffeur:"Karim", lat:36.75, lng:3.06, dispo:true },
+];
+
+let carte, cercle, clientMarker, calque, position, rayonKm = 10;
+
+function distanceKm(a, b){ // formule de Haversine
+  const R = 6371, r = Math.PI/180;
+  const dLat = (b.lat-a.lat)*r, dLng = (b.lng-a.lng)*r;
+  const h = Math.sin(dLat/2)**2 + Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function cargosDemo(c){
+  const types = ["Fourgon","Petit camion","Camion 10 t","Semi-remorque"];
+  return Array.from({length:14}, (_, i) => ({
+    nom: types[i%4] + " #" + (101+i), type: types[i%4], chauffeur: "Chauffeur " + (i+1),
+    lat: c.lat + (Math.random()-.5)*0.7, lng: c.lng + (Math.random()-.5)*0.9, dispo: Math.random() > .25
+  }));
+}
+
+const icone = couleur => L.divIcon({className:"", iconSize:[26,26], iconAnchor:[13,13],
+  html:`<div style="width:26px;height:26px;border-radius:50%;background:${couleur};border:3px solid #263342;display:grid;place-items:center;font-size:13px">🚚</div>`});
+
+function afficher(){
+  calque.clearLayers();
+  cercle.setRadius(rayonKm*1000);
+  carte.fitBounds(cercle.getBounds(), {padding:[20,20]});
+
+  const proches = CARGOS.map(c => ({...c, d: distanceKm(position, c)}))
+                        .filter(c => c.d <= rayonKm).sort((a,b) => a.d - b.d);
+
+  document.getElementById("compteur").textContent =
+    proches.length + (proches.length > 1 ? " cargos" : " cargo") + " dans " + rayonKm + " km";
+
+  const liste = document.getElementById("liste");
+  liste.innerHTML = "";
+  if (!proches.length){
+    document.getElementById("etat").textContent = "Aucun cargo dans ce rayon. Élargissez la zone de recherche.";
+  } else document.getElementById("etat").textContent = "";
+
+  proches.forEach(c => {
+    const m = L.marker([c.lat, c.lng], {icon: icone(c.dispo ? "#F2B705" : "#9AA5B1")}).addTo(calque)
+      .bindPopup(`<b>${c.nom}</b><br>${c.type} – ${c.chauffeur}<br>${c.d.toFixed(1)} km<br>${c.dispo ? "Disponible" : "Occupé"}`);
+    const li = document.createElement("li");
+    li.innerHTML = `<span><b>${c.nom}</b><br>${c.type} · <span class="${c.dispo ? "libre" : ""}">${c.dispo ? "Disponible" : "Occupé"}</span></span><span class="dist">${c.d.toFixed(1)} km</span>`;
+    li.onclick = () => { carte.setView([c.lat, c.lng], 14); m.openPopup(); };
+    liste.appendChild(li);
+  });
+}
+
+function demarrer(lat, lng, approx){
+  position = {lat, lng};
+  if (!CARGOS.length) CARGOS = cargosDemo(position);
+  if (!carte){
+    carte = L.map("carte");
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(carte);
+    calque = L.layerGroup().addTo(carte);
+    cercle = L.circle([lat,lng], {radius:rayonKm*1000, color:"#263342", weight:2, fillColor:"#F2B705", fillOpacity:.08}).addTo(carte);
+    clientMarker = L.circleMarker([lat,lng], {radius:9, color:"#fff", weight:3, fillColor:"#2E6FD9", fillOpacity:1})
+      .addTo(carte).bindPopup("Vous êtes ici");
+    carte.on("click", e => { // le client peut corriger sa position en cliquant
+      position = {lat:e.latlng.lat, lng:e.latlng.lng};
+      cercle.setLatLng(e.latlng); clientMarker.setLatLng(e.latlng); afficher();
+    });
+  }
+  if (approx) document.getElementById("etat").innerHTML =
+    '<span class="erreur">Localisation refusée ou indisponible. Touchez la carte à l\'endroit où vous êtes.</span>';
+  setTimeout(() => { carte.invalidateSize(); afficher(); }, 50);
+}
+
+document.getElementById("btnAttente").onclick = () => {
+  document.getElementById("zone").style.display = "block";
+  if (position) return;
+  document.getElementById("compteur").textContent = "Localisation en cours…";
+  if (!navigator.geolocation) return demarrer(36.7538, 3.0588, true);
+  navigator.geolocation.getCurrentPosition(
+    p => demarrer(p.coords.latitude, p.coords.longitude, false),
+    () => demarrer(36.7538, 3.0588, true),   // repli : Alger centre
+    {enableHighAccuracy:true, timeout:10000}
+  );
+};
+
+document.getElementById("rayons").onclick = e => {
+  if (!e.target.dataset.km) return;
+  document.querySelectorAll("#rayons button").forEach(b => b.classList.remove("actif"));
+  e.target.classList.add("actif");
+  rayonKm = +e.target.dataset.km;
+  if (position) afficher();
+};
+</script>
+</body>
+</html>
